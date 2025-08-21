@@ -2,19 +2,15 @@ package org.ns;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
-
 import org.apache.iceberg.*;
 import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.data.GenericAppenderFactory;
-import org.apache.iceberg.data.GenericRecord;
-import org.apache.iceberg.data.Record;
+import org.apache.iceberg.data.*;
 import org.apache.iceberg.data.parquet.GenericParquetReaders;
 import org.apache.iceberg.io.*;
 import org.apache.iceberg.parquet.ParquetSchemaUtil;
 import org.apache.iceberg.types.Types;
-
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.MessageType;
@@ -23,17 +19,16 @@ import java.io.File;
 import java.util.*;
 import java.util.concurrent.*;
 
-public class HiddenPartitionLoader {
+public class HiddenPartitionLoaderDemNested {
 
     private static final int THREAD_POOL_SIZE = 4;
     private static final int FILES_PER_BATCH = 5;
 
     public static void main(String[] args) throws Exception {
-        String localParquetDir = "/Users/vsrini/Downloads/parquet_files_events";
-
+        String localParquetDir = "/Users/vsrini/Downloads/parquet_files_dem";
         String warehouse = "s3://ns-dpl-ice-poc/";
         String database = "dpl_events_ice";
-        String tableName = "events";
+        String tableName = "dem";
 
         Configuration hadoopConf = new Configuration();
         hadoopConf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
@@ -60,9 +55,8 @@ public class HiddenPartitionLoader {
 
         Table table = catalog.tableExists(tableId)
                 ? catalog.loadTable(tableId)
-                : createTableWithTyPartition(tableId, localParquetDir, hadoopConf, catalog);
+                : createTableWithTypePartition(tableId, localParquetDir, hadoopConf, catalog);
 
-        // Update table properties if needed
         table.updateProperties()
                 .set(TableProperties.DEFAULT_FILE_FORMAT, FileFormat.PARQUET.name())
                 .set("write.parquet.compression-codec", "zstd")
@@ -102,11 +96,10 @@ public class HiddenPartitionLoader {
         System.out.println("✅ Successfully appended " + allDataFiles.size() + " parquet files to Iceberg table: " + tableId);
     }
 
-    private static Table createTableWithTyPartition(TableIdentifier tableId,
-                                                    String localParquetDir,
-                                                    Configuration hadoopConf,
-                                                    GlueCatalog catalog) throws Exception {
-        // Pick a sample parquet file for schema inference
+    private static Table createTableWithTypePartition(TableIdentifier tableId,
+                                                      String localParquetDir,
+                                                      Configuration hadoopConf,
+                                                      GlueCatalog catalog) throws Exception {
         File sampleFile = Arrays.stream(Objects.requireNonNull(new File(localParquetDir)
                         .listFiles((d, name) -> name.toLowerCase().endsWith(".parquet"))))
                 .findFirst().orElseThrow(() -> new RuntimeException("No parquet files found"));
@@ -118,10 +111,9 @@ public class HiddenPartitionLoader {
         MessageType parquetSchema = meta.getFileMetaData().getSchema();
         Schema icebergSchema = ParquetSchemaUtil.convert(parquetSchema);
 
-        // Remove any existing partition fields that might cause conflict (e.g., old ts partitions)
+        // Remove unwanted fields (if any)
         List<Types.NestedField> cleanedFields = new ArrayList<>();
         for (Types.NestedField field : icebergSchema.columns()) {
-            // Remove any event_ts_* or partition fields that you want to clean up
             String name = field.name();
             if (!name.startsWith("event_ts_") && !name.equals("event_ts")) {
                 cleanedFields.add(field);
@@ -129,13 +121,12 @@ public class HiddenPartitionLoader {
         }
         icebergSchema = new Schema(cleanedFields);
 
-        // Build partition spec using "ty" string field (identity partition)
         PartitionSpec spec = PartitionSpec.builderFor(icebergSchema)
-                .identity("ty")
+                .identity("type")
                 .build();
 
         System.out.println("Creating Iceberg table with schema: " + icebergSchema);
-        System.out.println("Using partition spec on 'ty': " + spec);
+        System.out.println("Using partition spec on 'type': " + spec);
 
         return catalog.createTable(tableId, icebergSchema, spec);
     }
@@ -154,17 +145,26 @@ public class HiddenPartitionLoader {
     }
 
     private static DataFile processSingleParquetToIceberg(File parquetFile, Table table, Configuration hadoopConf) throws Exception {
-        InputFile icebergInputFile = Files.localInput(parquetFile);
+        InputFile inputFile = Files.localInput(parquetFile);
 
         org.apache.parquet.hadoop.util.HadoopInputFile hif =
                 org.apache.parquet.hadoop.util.HadoopInputFile.fromPath(new Path(parquetFile.getAbsolutePath()), hadoopConf);
         ParquetMetadata meta = ParquetFileReader.open(hif).getFooter();
         MessageType parquetMessageType = meta.getFileMetaData().getSchema();
-        Schema sourceSchema = ParquetSchemaUtil.convert(parquetMessageType);
+        Schema parquetSchema = ParquetSchemaUtil.convert(parquetMessageType);
 
-        try (CloseableIterable<Record> records = org.apache.iceberg.parquet.Parquet.read(icebergInputFile)
-                .project(sourceSchema)
-                .createReaderFunc(fileSchema -> GenericParquetReaders.buildReader(table.schema(), fileSchema))
+        for (Types.NestedField nf: parquetSchema.columns()) {
+            System.out.println("Parquet Field: " + nf.name() + ", Type: " + nf.type());
+        }
+
+        for (Types.NestedField nf : table.schema().columns()) {
+            System.out.println("Iceberg Field: " + nf.name() + ", Type: " + nf.type());
+        }
+
+        // Read parquet file using its own schema to avoid nulls
+        try (CloseableIterable<Record> records = org.apache.iceberg.parquet.Parquet.read(inputFile)
+                .project(table.schema()) // ✅ Iceberg schema, not Parquet
+                .createReaderFunc(fileSchema -> GenericParquetReaders.buildReader(parquetSchema, fileSchema))
                 .build()) {
 
             String filename = "data-" + UUID.randomUUID() + ".parquet";
@@ -180,21 +180,17 @@ public class HiddenPartitionLoader {
 
             try (FileAppender<Record> writer = appenderFactory.newAppender(outputFile, FileFormat.PARQUET)) {
                 for (Record src : records) {
+                    for (Types.NestedField nf: src.struct().fields()) {
+                        System.out.println("Parquet:: Field: " + nf.name() + ", Value: " + src.getField(nf.name()));
+                    }
                     GenericRecord target = GenericRecord.create(table.schema());
-
-                    for (Types.NestedField f : sourceSchema.columns()) {
-                        String name = f.name();
-                        if (table.schema().findField(name) != null) {
-                            // Copy all fields except 'ty' because it is used as partition (optional)
-                            if (!"ty".equals(name)) {
-                                target.setField(name, src.getField(name));
-                            } else {
-                                // You may still want to include the 'ty' field in data if it exists
-                                target.setField(name, src.getField(name));
-                            }
+                    // Map fields recursively from parquetSchema -> table.schema()
+                    for (Types.NestedField f : table.schema().columns()) {
+                        if (parquetSchema.findField(f.name()) != null) {
+                            Object value = src.getField(f.name());
+                            copyFieldRecursive(value, target, f);
                         }
                     }
-
                     writer.add(target);
                     recordCount++;
                 }
@@ -202,33 +198,23 @@ public class HiddenPartitionLoader {
 
             long fileSizeInBytes = table.io().newInputFile(outputFile.location()).getLength();
 
-            // Set partition data based on 'ty' field from the first record of the file
-            // For simplicity, let's read the first record's 'ty' value from the original parquet file
-            // You can optimize or customize this as needed
-
-            String tyPartitionValue = null;
-            try (CloseableIterable<Record> recordsForPartition = org.apache.iceberg.parquet.Parquet.read(icebergInputFile)
-                    .project(sourceSchema)
-                    .createReaderFunc(fileSchema -> GenericParquetReaders.buildReader(table.schema(), fileSchema))
+            // Determine 'type' partition
+            String typePartitionValue = null;
+            try (CloseableIterable<Record> recordsForPartition = org.apache.iceberg.parquet.Parquet.read(inputFile)
+                    .project(parquetSchema)
+                    .createReaderFunc(fileSchema -> GenericParquetReaders.buildReader(parquetSchema, fileSchema))
                     .build()) {
                 Iterator<Record> iterator = recordsForPartition.iterator();
                 if (iterator.hasNext()) {
-                    Record firstRecord = iterator.next();
-                    Object val = firstRecord.getField("ty");
-                    if (val != null) {
-                        tyPartitionValue = val.toString();
-                    }
+                    Object val = iterator.next().getField("type");
+                    if (val != null) typePartitionValue = val.toString();
                 }
             }
 
-            if (tyPartitionValue == null) {
-                // If no partition value is found, set null for partition
-                for (int i = 0; i < partitionData.size(); i++) {
-                    partitionData.set(i, null);
-                }
+            if (typePartitionValue == null) {
+                for (int i = 0; i < partitionData.size(); i++) partitionData.set(i, null);
             } else {
-                // Set the partition string value
-                partitionData.set(0, tyPartitionValue);
+                partitionData.set(0, typePartitionValue);
             }
 
             return DataFiles.builder(spec)
@@ -238,6 +224,60 @@ public class HiddenPartitionLoader {
                     .withFormat(FileFormat.PARQUET)
                     .withPartition(partitionData)
                     .build();
+        }
+    }
+
+    private static void copyFieldRecursive(Object srcValue, GenericRecord target, Types.NestedField field) {
+        if (srcValue == null) {
+            target.setField(field.name(), null);
+            return;
+        }
+
+        switch (field.type().typeId()) {
+            case STRUCT:
+                Types.StructType structType = (Types.StructType) field.type();
+                GenericRecord nestedTarget = GenericRecord.create(structType);
+                Record nestedSrc = (Record) srcValue;
+                for (Types.NestedField nestedField : structType.fields()) {
+                    copyFieldRecursive(nestedSrc.getField(nestedField.name()), nestedTarget, nestedField);
+                }
+                target.setField(field.name(), nestedTarget);
+                break;
+
+            case LIST:
+                Types.ListType listType = (Types.ListType) field.type();
+                List<Object> listValues = new ArrayList<>();
+                for (Object item : (List<?>) srcValue) {
+                    if (listType.elementType().isStructType()) {
+                        GenericRecord nested = GenericRecord.create((Types.StructType) listType.elementType());
+                        copyFieldRecursive(item, nested, ((Types.StructType) listType.elementType()).fields().get(0));
+                        listValues.add(nested);
+                    } else {
+                        listValues.add(item);
+                    }
+                }
+                target.setField(field.name(), listValues);
+                break;
+
+            case MAP:
+                Types.MapType mapType = (Types.MapType) field.type();
+                Map<Object, Object> mapValues = new HashMap<>();
+                for (Map.Entry<?, ?> entry : ((Map<?, ?>) srcValue).entrySet()) {
+                    Object k = entry.getKey();
+                    Object v = entry.getValue();
+                    if (mapType.valueType().isStructType()) {
+                        GenericRecord nested = GenericRecord.create((Types.StructType) mapType.valueType());
+                        copyFieldRecursive(v, nested, ((Types.StructType) mapType.valueType()).fields().get(0));
+                        mapValues.put(k, nested);
+                    } else {
+                        mapValues.put(k, v);
+                    }
+                }
+                target.setField(field.name(), mapValues);
+                break;
+
+            default:
+                target.setField(field.name(), srcValue);
         }
     }
 
