@@ -165,7 +165,8 @@
                                     <!-- <mainClass>org.ns.LocalReadParquetToS3Iceberg</mainClass> -->
                                     <!-- <mainClass>org.ns.BulkParquetToIcebergAtomicMultipart</mainClass> -->
                                     <!-- <mainClass>org.ns.HiddenPartitionLoader</mainClass> -->
-                                    <mainClass>org.ns.HiddenPartitionLoaderDemNested</mainClass>
+                                    <!-- <mainClass>org.ns.HiddenPartitionLoaderDemNested</mainClass> -->
+                                    <mainClass>org.ns.HiddenPartitionLoaderWithKMS</mainClass>
                                 </transformer>
                             </transformers>
                         </configuration>
