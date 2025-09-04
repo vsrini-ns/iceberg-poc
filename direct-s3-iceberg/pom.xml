@@ -166,7 +166,8 @@
                                     <!-- <mainClass>org.ns.BulkParquetToIcebergAtomicMultipart</mainClass> -->
                                     <!-- <mainClass>org.ns.HiddenPartitionLoader</mainClass> -->
                                     <!-- <mainClass>org.ns.HiddenPartitionLoaderDemNested</mainClass> -->
-                                    <mainClass>org.ns.HiddenPartitionLoaderWithKMS</mainClass>
+                                    <!-- <mainClass>org.ns.HiddenPartitionLoaderWithKMS</mainClass> -->
+                                    <mainClass>org.ns.aig.AIGEventsTableCreator</mainClass>
                                 </transformer>
                             </transformers>
                         </configuration>
