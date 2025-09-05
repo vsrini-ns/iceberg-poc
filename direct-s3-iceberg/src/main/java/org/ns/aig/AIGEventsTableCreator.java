@@ -7,16 +7,18 @@ import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.GenericRecord;
 
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.logging.Logger;
+import java.util.logging.Level;
 
 /**
  * AIG Events Table Creator and Data Generator
  * Creates Iceberg table with AIG Events schema and generates test data
  */
 public class AIGEventsTableCreator {
+
+    private static final Logger LOGGER = Logger.getLogger(AIGEventsTableCreator.class.getName());
 
     // Configuration constants
     private static final String WAREHOUSE = "s3://ns-dpl-ice-poc/aig/";
@@ -29,7 +31,6 @@ public class AIGEventsTableCreator {
     private static final String[] AI_PROVIDERS = {"openai", "anthropic", "cohere", "google", "aws-bedrock"};
     private static final String[] SERVICE_IDS = {"ai-gateway-v1", "ai-gateway-v2", "ai-proxy", "ml-service"};
     private static final String[] HOME_POPS = {"us-west-2", "us-east-1", "eu-west-1", "ap-southeast-1"};
-    private static final String[] REQUEST_TYPES = {"inference", "training", "embedding", "completion"};
     private static final String[] MODELS = {"gpt-4", "claude-3", "llama-2", "gemini-pro", "titan-xl"};
 
     public static void main(String[] args) throws Exception {
@@ -60,7 +61,7 @@ public class AIGEventsTableCreator {
         } catch (Exception e) {
             System.err.println("❌ AIG Events table creation FAILED!");
             System.err.println("Error: " + e.getMessage());
-            e.printStackTrace();
+            LOGGER.log(Level.SEVERE, "AIG Events table creation failed", e);
             throw e;
         }
     }
@@ -112,19 +113,25 @@ public class AIGEventsTableCreator {
             table = catalog.loadTable(tableId);
             System.out.println("✓ Loaded existing table: " + tableId);
         } else {
-            // Create partition spec with time-based partitioning using long timestamp
+            // Create partition spec with exact hierarchical time-based partitioning
+            // Format: type=<type>/tenant_id=<tenant_id>/partition_year=<yyyy>/partition_month=<mm>/partition_day=<dd>/partition_hour=<hh>/<UUID>.parquet
             PartitionSpec spec = PartitionSpec.builderFor(schema)
-                    .identity("tenant_id")                    // Partition by tenant for multi-tenancy
-                    .truncate("timestamp", 86400000)          // Daily partitions (24*60*60*1000 ms)
-                    .truncate("timestamp", 3600000, "ts_hour") // Hourly sub-partitions (60*60*1000 ms)
-                    .identity("service_id")                   // Partition by service for performance
+                    .identity("type")                          // type=<type>
+                    .identity("tenant_id")                     // tenant_id=<tenant_id>
+                    .identity("partition_year")                // partition_year=<yyyy>
+                    .identity("partition_month")               // partition_month=<mm>
+                    .identity("partition_day")                 // partition_day=<dd>
+                    .identity("partition_hour")                // partition_hour=<hh>
                     .build();
 
             table = catalog.createTable(tableId, schema, spec);
-            System.out.println("✓ Created new table with time-based partitions: " + tableId);
-            System.out.println("  - Daily partitions based on timestamp truncation");
-            System.out.println("  - Hourly sub-partitions for granular access");
-            System.out.println("  - Tenant and service partitions for isolation");
+            System.out.println("✓ Created new table with hierarchical partitions: " + tableId);
+            System.out.println("  - Type partitions: type=<type>");
+            System.out.println("  - Tenant partitions: tenant_id=<tenant_id>");
+            System.out.println("  - Year partitions: partition_year=<yyyy>");
+            System.out.println("  - Month partitions: partition_month=<mm>");
+            System.out.println("  - Day partitions: partition_day=<dd>");
+            System.out.println("  - Hour partitions: partition_hour=<hh>");
         }
 
         // Set table properties for optimal performance
@@ -155,8 +162,8 @@ public class AIGEventsTableCreator {
     private static List<GenericRecord> generateTestRecords(Schema schema) {
         List<GenericRecord> records = new ArrayList<>();
         ThreadLocalRandom random = ThreadLocalRandom.current();
-        long baseTime = Instant.now().minus(7, ChronoUnit.DAYS).toEpochMilli();
-
+        // Use current time for better hierarchical partitioning demonstration
+        long currentTime = System.currentTimeMillis();
         for (int i = 0; i < NUM_TEST_RECORDS; i++) {
             GenericRecord record = GenericRecord.create(schema);
 
@@ -164,14 +171,24 @@ public class AIGEventsTableCreator {
             record.setField("tenant_id", 1000 + (i % 10)); // 10 different tenants
             record.setField("home_pop", HOME_POPS[i % HOME_POPS.length]);
             record.setField("service_id", SERVICE_IDS[i % SERVICE_IDS.length]);
-            record.setField("timestamp", baseTime + (i * 3600000L)); // Hourly intervals
+
+            // Set timestamp and derive partition fields for exact path structure
+            long timestamp = currentTime + (i * 60000L); // 1-minute intervals
+            record.setField("timestamp", timestamp);
+
+            // Add derived fields for exact partition structure: year/month/day/hour
+            java.time.Instant instant = java.time.Instant.ofEpochMilli(timestamp);
+            java.time.ZonedDateTime zdt = instant.atZone(java.time.ZoneOffset.UTC);
+            record.setField("partition_year", zdt.getYear());
+            record.setField("partition_month", zdt.getMonthValue());
+            record.setField("partition_day", zdt.getDayOfMonth());
+            record.setField("partition_hour", zdt.getHour());
 
             // Optional basic fields
             record.setField("transaction_id", 100000 + i);
             record.setField("response_id", "resp-" + UUID.randomUUID().toString().substring(0, 8));
             record.setField("version", "1." + (i % 5) + ".0");
-            record.setField("type", REQUEST_TYPES[i % REQUEST_TYPES.length]);
-            record.setField("gateway_id", "gw-" + (i % 3));
+            record.setField("type", "aig"); // Set type to "aig" for the hierarchical path structure
             record.setField("ai_provider_id", AI_PROVIDERS[i % AI_PROVIDERS.length]);
             record.setField("cs_model", MODELS[i % MODELS.length]);
             record.setField("rs_model", MODELS[i % MODELS.length]);
@@ -285,6 +302,7 @@ public class AIGEventsTableCreator {
         return rateLimits;
     }
 
+    @SuppressWarnings("unchecked")
     private static void writeRecordsWithPartitioning(Table table, List<GenericRecord> records) throws Exception {
         System.out.println("Writing records with proper partitioning...");
 
@@ -303,20 +321,19 @@ public class AIGEventsTableCreator {
         Map<String, List<GenericRecord>> partitionedRecords = new HashMap<>();
 
         for (GenericRecord record : records) {
-            // Create a simple partition key based on tenant_id and service_id
-            String partitionKey = record.getField("tenant_id") + "_" + record.getField("service_id");
+            // Create partition key using all partition fields: type, tenant_id, and timestamp-based partitions
+            String type = (String) record.getField("type");
+            Integer tenantId = (Integer) record.getField("tenant_id");
+            Long timestamp = (Long) record.getField("timestamp");
+
+            // Create a comprehensive partition key
+            String partitionKey = type + "_" + tenantId + "_" + timestamp;
             partitionedRecords.computeIfAbsent(partitionKey, k -> new ArrayList<>()).add(record);
         }
 
         // Write each partition group to separate files
         for (Map.Entry<String, List<GenericRecord>> entry : partitionedRecords.entrySet()) {
-            String partitionKey = entry.getKey();
             List<GenericRecord> partitionRecords = entry.getValue();
-
-            // Create a data writer for this partition - compute partition values properly
-            String dataLocation = table.locationProvider().newDataLocation(partitionKey);
-            org.apache.iceberg.io.OutputFile outputFile = table.io().newOutputFile(dataLocation);
-            org.apache.iceberg.encryption.EncryptedOutputFile encryptedOutputFile = table.encryption().encrypt(outputFile);
 
             // Get the first record to compute partition values
             GenericRecord firstRecord = partitionRecords.get(0);
@@ -338,51 +355,55 @@ public class AIGEventsTableCreator {
                     // Identity transform - use the value as-is
                     partitionRecord.setField(partitionFieldName, sourceValue);
                 } else {
-                    // Transform the value (e.g., truncate for timestamp)
-                    if (sourceValue instanceof Long && field.transform().toString().startsWith("truncate")) {
+                    // Handle timestamp transforms (year, month, day, hour)
+                    if (sourceValue instanceof Long) {
                         Long longValue = (Long) sourceValue;
-                        // Apply the transform
-                        org.apache.iceberg.transforms.Transform<Long, Long> longTransform =
-                            (org.apache.iceberg.transforms.Transform<Long, Long>) field.transform();
-                        Long transformedValue = longTransform.apply(longValue);
-                        partitionRecord.setField(partitionFieldName, transformedValue);
+                        // Apply the transform using Iceberg's transform API (fixed deprecated usage)
+                        org.apache.iceberg.transforms.Transform<Long, Integer> transform =
+                            (org.apache.iceberg.transforms.Transform<Long, Integer>) field.transform();
+                        Integer partitionValue = transform.bind(table.schema().findType(field.sourceId())).apply(longValue);
+                        partitionRecord.setField(partitionFieldName, partitionValue);
                     } else {
                         partitionRecord.setField(partitionFieldName, sourceValue);
                     }
                 }
             }
 
-            org.apache.iceberg.io.DataWriter<org.apache.iceberg.data.Record> dataWriter = null;
-            try {
-                dataWriter = factory.newDataWriter(encryptedOutputFile, FileFormat.PARQUET, partitionRecord);
+            // Create proper data location for this partition using Iceberg's partition path structure
+            org.apache.iceberg.StructLike partitionData = partitionRecord;
+            String fileLocation = table.locationProvider().newDataLocation(table.spec(), partitionData, "data-" + UUID.randomUUID() + ".parquet");
 
+            // Get the FileIO from the table (don't close it manually)
+            org.apache.iceberg.io.FileIO fileIO = table.io();
+            org.apache.iceberg.io.OutputFile outputFile = fileIO.newOutputFile(fileLocation);
+            org.apache.iceberg.encryption.EncryptedOutputFile encryptedFile = table.encryption().encrypt(outputFile);
+
+            // Create the data writer and write records
+            org.apache.iceberg.io.DataWriter<org.apache.iceberg.data.Record> dataWriter =
+                 factory.newDataWriter(encryptedFile, FileFormat.PARQUET, partitionRecord);
+
+            try {
                 // Write records for this partition
                 for (GenericRecord partitionRec : partitionRecords) {
                     dataWriter.write(partitionRec);
                 }
-
-                // Close and get the data file
-                dataWriter.close();
-                org.apache.iceberg.io.DataWriteResult result = dataWriter.result();
-
-                // Add all data files from this writer
-                dataFiles.addAll(result.dataFiles());
-
             } finally {
-                if (dataWriter != null) {
-                    try {
-                        dataWriter.close();
-                    } catch (Exception e) {
-                        // Already closed
-                    }
-                }
+                // Always close the writer - this will complete the S3 upload
+                dataWriter.close();
             }
+
+            // Now we can safely get the result after closing
+            org.apache.iceberg.io.DataWriteResult result = dataWriter.result();
+
+            // Add all data files from this writer
+            dataFiles.addAll(result.dataFiles());
         }
 
-        System.out.println("✓ Written " + records.size() + " records with computed partition values");
-        System.out.println("✓ Data files created with partition information:");
+        System.out.println("✓ Written " + records.size() + " records with hierarchical partition structure");
+        System.out.println("✓ Data files created with proper S3 path structure:");
         System.out.println("  - Records written: " + records.size());
         System.out.println("  - Data files: " + dataFiles.size());
+        System.out.println("  - Expected S3 path: type=aig/tenant_id=<tenant_id>/partition_year=<yyyy>/partition_month=<mm>/partition_day=<dd>/partition_hour=<hh>/");
 
         // Add all data files to the append operation
         for (DataFile dataFile : dataFiles) {
@@ -392,6 +413,6 @@ public class AIGEventsTableCreator {
         // Atomic commit - makes all data visible at once
         append.commit();
 
-        System.out.println("✓ Atomic commit completed - all data visible with proper partition structure");
+        System.out.println("✓ Atomic commit completed - all data visible with hierarchical partition structure");
     }
 }

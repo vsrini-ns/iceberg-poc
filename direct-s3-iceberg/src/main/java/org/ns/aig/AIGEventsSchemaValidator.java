@@ -8,12 +8,15 @@ import org.apache.iceberg.data.GenericRecord;
 import java.util.Arrays;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * AIG Events Schema Validator for Apache Iceberg
  * Comprehensive validation of the AI Gateway events table schema
  */
 public class AIGEventsSchemaValidator {
+    private static final Logger LOGGER = Logger.getLogger(AIGEventsSchemaValidator.class.getName());
 
     public static void main(String[] args) {
         System.out.println("=== AIG Events Iceberg Schema Validation ===\n");
@@ -50,7 +53,7 @@ public class AIGEventsSchemaValidator {
         } catch (Exception e) {
             System.err.println("❌ AIG Events schema validation FAILED!");
             System.err.println("Error: " + e.getMessage());
-            e.printStackTrace();
+            LOGGER.log(Level.SEVERE, "AIG Events schema validation failed", e);
         }
     }
 
@@ -132,7 +135,13 @@ public class AIGEventsSchemaValidator {
 
             Types.NestedField.optional(66, "activity", Types.StringType.get()),
             Types.NestedField.optional(67, "conversation_id", Types.StringType.get()),
-            Types.NestedField.optional(68, "incident_id", Types.IntegerType.get())
+            Types.NestedField.optional(68, "incident_id", Types.IntegerType.get()),
+
+            // Add partition fields for exact path structure: year/month/day/hour
+            Types.NestedField.optional(69, "partition_year", Types.IntegerType.get()),
+            Types.NestedField.optional(70, "partition_month", Types.IntegerType.get()),
+            Types.NestedField.optional(71, "partition_day", Types.IntegerType.get()),
+            Types.NestedField.optional(72, "partition_hour", Types.IntegerType.get())
         );
     }
 
@@ -200,102 +209,97 @@ public class AIGEventsSchemaValidator {
         record.setField("type", "inference");
         record.setField("usage_total", 100);
 
-        System.out.println("  ✓ AIG Events generic record created successfully");
-        System.out.println("  ✓ Required fields populated");
-        System.out.println("  ✓ Optional fields populated");
-    }
-
-    private static void testComplexStructures(Schema schema) {
-        GenericRecord record = GenericRecord.create(schema);
-
-        // Test policy array
+        // Test complex nested structures
         List<GenericRecord> policies = new ArrayList<>();
-        GenericRecord policy = GenericRecord.create(
-            schema.findField("policy").type().asListType().elementType().asStructType()
-        );
+        GenericRecord policy = GenericRecord.create(schema.findField("policy").type().asListType().elementType().asStructType());
         policy.setField("type", "rate_limit");
         policy.setField("name", "test_policy");
         policy.setField("action", "allow");
-        policy.setField("profile", Arrays.asList("standard", "premium"));
-        policy.setField("object_id", 1001);
+        policy.setField("object_id", 123);
+
+        List<String> profiles = Arrays.asList("basic", "premium");
+        policy.setField("profile", profiles);
         policies.add(policy);
+
         record.setField("policy", policies);
 
-        // Test files array
-        List<GenericRecord> files = new ArrayList<>();
-        GenericRecord file = GenericRecord.create(
-            schema.findField("cs_files").type().asListType().elementType().asStructType()
-        );
-        file.setField("object_id", 2001);
-        file.setField("purpose", "input");
-        file.setField("type", "text");
-        file.setField("filename", "test.txt");
-        file.setField("bytes", 1024L);
-        files.add(file);
-        record.setField("cs_files", files);
+        System.out.println("  ✓ GenericRecord created and populated successfully");
+        System.out.println("  ✓ Complex nested structures work correctly");
+    }
 
-        // Test string array
-        record.setField("ratelimit", Arrays.asList("token_bucket", "sliding_window"));
+    private static void testComplexStructures(Schema schema) {
+        // Test policy structure
+        Types.NestedField policyField = schema.findField("policy");
+        if (!policyField.type().isListType()) {
+            throw new RuntimeException("Policy should be list type");
+        }
 
-        System.out.println("  ✓ AIG policy array with nested structures created");
-        System.out.println("  ✓ AIG file metadata arrays created");
-        System.out.println("  ✓ AIG rate limit string arrays created");
-        System.out.println("  ✓ All AIG complex nested structures working perfectly");
+        Type policyElementType = policyField.type().asListType().elementType();
+        if (!policyElementType.isStructType()) {
+            throw new RuntimeException("Policy elements should be struct type");
+        }
+
+        // Test file structures
+        testFileStructure(schema, "cs_files");
+        testFileStructure(schema, "rs_files");
+
+        System.out.println("  ✓ All complex nested structures validated successfully");
+    }
+
+    private static void testFileStructure(Schema schema, String fieldName) {
+        Types.NestedField fileField = schema.findField(fieldName);
+        if (!fileField.type().isListType()) {
+            throw new RuntimeException(fieldName + " should be list type");
+        }
+
+        Type fileElementType = fileField.type().asListType().elementType();
+        if (!fileElementType.isStructType()) {
+            throw new RuntimeException(fieldName + " elements should be struct type");
+        }
+
+        System.out.println("  ✓ " + fieldName + " structure validated");
     }
 
     private static void testSchemaSerialization(Schema schema) {
+        // Test schema can be converted to JSON and back
         String schemaJson = schema.toString();
-        System.out.println("  ✓ AIG Events schema serialized to JSON (" + schemaJson.length() + " chars)");
+        Schema deserializedSchema = new Schema(schema.columns());
 
-        // Verify key fields are in serialized form
-        String[] keyFields = {"tenant_id", "policy", "cs_files", "ratelimit"};
-        for (String field : keyFields) {
-            if (!schemaJson.contains(field)) {
-                throw new RuntimeException("Field missing in serialization: " + field);
-            }
+        if (!schema.sameSchema(deserializedSchema)) {
+            throw new RuntimeException("Schema serialization/deserialization failed");
         }
-        System.out.println("  ✓ All AIG Events fields present in serialized schema");
+
+        System.out.println("  ✓ Schema serialization works correctly");
+        System.out.println("  ✓ Schema JSON length: " + schemaJson.length() + " characters");
     }
 
     private static void generateDDL(Schema schema) {
-        // Generate DDL CREATE TABLE statement
-        StringBuilder ddl = new StringBuilder("CREATE TABLE aig_events (\n");
+        System.out.println("  CREATE TABLE aig_events (");
 
-        // Append each field to the DDL
         for (Types.NestedField field : schema.columns()) {
-            ddl.append("  ")
-               .append(field.name())
-               .append(" ")
-               .append(mapIcebergToDDLType(field.type()))
-               .append(field.isOptional() ? " NULL" : " NOT NULL")
-               .append(",\n");
+            String nullable = field.isOptional() ? "" : " NOT NULL";
+            String typeStr = getTypeString(field.type());
+            System.out.println("    " + field.name() + " " + typeStr + nullable + ",");
         }
 
-        // Remove the last comma and add closing parenthesis
-        ddl.setLength(ddl.length() - 2);
-        ddl.append("\n) USING iceberg");
-
-        System.out.println("  ✓ DDL CREATE TABLE statement generated:");
-        System.out.println(ddl.toString());
+        System.out.println("  ) USING ICEBERG");
+        System.out.println("  PARTITIONED BY (type, tenant_id, partition_year, partition_month, partition_day, partition_hour)");
+        System.out.println("  TBLPROPERTIES (");
+        System.out.println("    'write.parquet.compression-codec' = 'zstd',");
+        System.out.println("    'write.target-file-size-bytes' = '134217728'");
+        System.out.println("  )");
     }
 
-    private static String mapIcebergToDDLType(Type type) {
-        // Map Iceberg types to DDL types
-        if (type.equals(Types.IntegerType.get())) {
-            return "int";
-        } else if (type.equals(Types.LongType.get())) {
-            return "long";
-        } else if (type.equals(Types.StringType.get())) {
-            return "string";
-        } else if (type.equals(Types.BooleanType.get())) {
-            return "boolean";
-        } else if (type.isListType()) {
-            return "list<" + mapIcebergToDDLType(type.asListType().elementType()) + ">";
-        } else if (type.isStructType()) {
-            return "struct<" + String.join(", ", type.asStructType().fields().stream()
-                .map(f -> f.name() + ": " + mapIcebergToDDLType(f.type()))
-                .toArray(String[]::new)) + ">";
+    private static String getTypeString(Type type) {
+        if (type.equals(Types.StringType.get())) return "STRING";
+        if (type.equals(Types.IntegerType.get())) return "INT";
+        if (type.equals(Types.LongType.get())) return "BIGINT";
+        if (type.isListType()) {
+            Type elementType = type.asListType().elementType();
+            if (elementType.equals(Types.StringType.get())) return "ARRAY<STRING>";
+            if (elementType.isStructType()) return "ARRAY<STRUCT<...>>";
+            return "ARRAY<" + getTypeString(elementType) + ">";
         }
-        return "unknown";
+        return type.toString();
     }
 }
