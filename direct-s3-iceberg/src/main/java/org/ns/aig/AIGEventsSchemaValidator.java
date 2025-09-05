@@ -137,11 +137,12 @@ public class AIGEventsSchemaValidator {
             Types.NestedField.optional(67, "conversation_id", Types.StringType.get()),
             Types.NestedField.optional(68, "incident_id", Types.IntegerType.get()),
 
-            // Add partition fields for exact path structure: year/month/day/hour
-            Types.NestedField.optional(69, "partition_year", Types.IntegerType.get()),
-            Types.NestedField.optional(70, "partition_month", Types.IntegerType.get()),
-            Types.NestedField.optional(71, "partition_day", Types.IntegerType.get()),
-            Types.NestedField.optional(72, "partition_hour", Types.IntegerType.get())
+            // Add partition fields with short names for S3 path structure
+            Types.NestedField.optional(69, "tenant", Types.IntegerType.get()),
+            Types.NestedField.optional(70, "year", Types.IntegerType.get()),
+            Types.NestedField.optional(71, "month", Types.IntegerType.get()),
+            Types.NestedField.optional(72, "day", Types.IntegerType.get()),
+            Types.NestedField.optional(73, "hour", Types.IntegerType.get())
         );
     }
 

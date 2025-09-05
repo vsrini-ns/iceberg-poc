@@ -114,24 +114,24 @@ public class AIGEventsTableCreator {
             System.out.println("✓ Loaded existing table: " + tableId);
         } else {
             // Create partition spec with exact hierarchical time-based partitioning
-            // Format: type=<type>/tenant_id=<tenant_id>/partition_year=<yyyy>/partition_month=<mm>/partition_day=<dd>/partition_hour=<hh>/<UUID>.parquet
+            // Format: type=<type>/tenant=<tenant>/year=<yyyy>/month=<mm>/day=<dd>/hour=<hh>/<UUID>.parquet
             PartitionSpec spec = PartitionSpec.builderFor(schema)
                     .identity("type")                          // type=<type>
-                    .identity("tenant_id")                     // tenant_id=<tenant_id>
-                    .identity("partition_year")                // partition_year=<yyyy>
-                    .identity("partition_month")               // partition_month=<mm>
-                    .identity("partition_day")                 // partition_day=<dd>
-                    .identity("partition_hour")                // partition_hour=<hh>
+                    .identity("tenant")                        // tenant=<tenant>
+                    .identity("year")                          // year=<yyyy>
+                    .identity("month")                         // month=<mm>
+                    .identity("day")                           // day=<dd>
+                    .identity("hour")                          // hour=<hh>
                     .build();
 
             table = catalog.createTable(tableId, schema, spec);
             System.out.println("✓ Created new table with hierarchical partitions: " + tableId);
             System.out.println("  - Type partitions: type=<type>");
-            System.out.println("  - Tenant partitions: tenant_id=<tenant_id>");
-            System.out.println("  - Year partitions: partition_year=<yyyy>");
-            System.out.println("  - Month partitions: partition_month=<mm>");
-            System.out.println("  - Day partitions: partition_day=<dd>");
-            System.out.println("  - Hour partitions: partition_hour=<hh>");
+            System.out.println("  - Tenant partitions: tenant=<tenant>");
+            System.out.println("  - Year partitions: year=<yyyy>");
+            System.out.println("  - Month partitions: month=<mm>");
+            System.out.println("  - Day partitions: day=<dd>");
+            System.out.println("  - Hour partitions: hour=<hh>");
         }
 
         // Set table properties for optimal performance
@@ -163,7 +163,7 @@ public class AIGEventsTableCreator {
         List<GenericRecord> records = new ArrayList<>();
         ThreadLocalRandom random = ThreadLocalRandom.current();
         // Use current time for better hierarchical partitioning demonstration
-        long currentTime = System.currentTimeMillis();
+        long timestamp = System.currentTimeMillis();
         for (int i = 0; i < NUM_TEST_RECORDS; i++) {
             GenericRecord record = GenericRecord.create(schema);
 
@@ -173,16 +173,18 @@ public class AIGEventsTableCreator {
             record.setField("service_id", SERVICE_IDS[i % SERVICE_IDS.length]);
 
             // Set timestamp and derive partition fields for exact path structure
-            long timestamp = currentTime + (i * 60000L); // 1-minute intervals
             record.setField("timestamp", timestamp);
 
-            // Add derived fields for exact partition structure: year/month/day/hour
+            // Add derived fields for exact partition structure using SHORT field names
             java.time.Instant instant = java.time.Instant.ofEpochMilli(timestamp);
             java.time.ZonedDateTime zdt = instant.atZone(java.time.ZoneOffset.UTC);
-            record.setField("partition_year", zdt.getYear());
-            record.setField("partition_month", zdt.getMonthValue());
-            record.setField("partition_day", zdt.getDayOfMonth());
-            record.setField("partition_hour", zdt.getHour());
+
+            // Populate the SHORT partition fields that will be used in S3 paths
+            record.setField("tenant", 1000 + (i % 10));        // tenant=<tenant>
+            record.setField("year", zdt.getYear());            // year=<yyyy>
+            record.setField("month", zdt.getMonthValue());      // month=<mm>
+            record.setField("day", zdt.getDayOfMonth());        // day=<dd>
+            record.setField("hour", zdt.getHour());             // hour=<hh>
 
             // Optional basic fields
             record.setField("transaction_id", 100000 + i);
@@ -403,7 +405,7 @@ public class AIGEventsTableCreator {
         System.out.println("✓ Data files created with proper S3 path structure:");
         System.out.println("  - Records written: " + records.size());
         System.out.println("  - Data files: " + dataFiles.size());
-        System.out.println("  - Expected S3 path: type=aig/tenant_id=<tenant_id>/partition_year=<yyyy>/partition_month=<mm>/partition_day=<dd>/partition_hour=<hh>/");
+        System.out.println("  - Expected S3 path: type=aig/tenant=<tenant>/year=<yyyy>/month=<mm>/day=<dd>/hour=<hh>/");
 
         // Add all data files to the append operation
         for (DataFile dataFile : dataFiles) {
