@@ -21,9 +21,9 @@ public class AIGEventsTableCreator {
     private static final Logger LOGGER = Logger.getLogger(AIGEventsTableCreator.class.getName());
 
     // Configuration constants
-    private static final String WAREHOUSE = "s3://ns-dpl-ice-poc/aig/";
+    private static final String WAREHOUSE = "s3://ns-dpl-ice-poc/";
     private static final String DATABASE = "dpl_events_ice";
-    private static final String TABLE_NAME = "events";
+    private static final String TABLE_NAME = "event_aig";
     private static final String S3A_ENDPOINT = "s3.us-west-2.amazonaws.com";
 
     // Test data generation parameters
@@ -114,10 +114,10 @@ public class AIGEventsTableCreator {
             System.out.println("✓ Loaded existing table: " + tableId);
         } else {
             // Create partition spec with exact hierarchical time-based partitioning
-            // Format: type=<type>/tenant=<tenant>/year=<yyyy>/month=<mm>/day=<dd>/hour=<hh>/<UUID>.parquet
+            // Format: tenant=<tenant>/type=<type>/year=<yyyy>/month=<mm>/day=<dd>/hour=<hh>/<UUID>.parquet
             PartitionSpec spec = PartitionSpec.builderFor(schema)
-                    .identity("type")                          // type=<type>
                     .identity("tenant")                        // tenant=<tenant>
+                    // .identity("type")                          // type=<type>
                     .identity("year")                          // year=<yyyy>
                     .identity("month")                         // month=<mm>
                     .identity("day")                           // day=<dd>
@@ -126,8 +126,8 @@ public class AIGEventsTableCreator {
 
             table = catalog.createTable(tableId, schema, spec);
             System.out.println("✓ Created new table with hierarchical partitions: " + tableId);
-            System.out.println("  - Type partitions: type=<type>");
             System.out.println("  - Tenant partitions: tenant=<tenant>");
+            System.out.println("  - Type partitions: type=<type>");
             System.out.println("  - Year partitions: year=<yyyy>");
             System.out.println("  - Month partitions: month=<mm>");
             System.out.println("  - Day partitions: day=<dd>");
