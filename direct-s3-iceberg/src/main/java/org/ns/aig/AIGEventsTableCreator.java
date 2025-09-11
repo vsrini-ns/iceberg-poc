@@ -184,6 +184,7 @@ public class AIGEventsTableCreator {
         table.updateProperties()
                 .set(TableProperties.DEFAULT_FILE_FORMAT, FileFormat.PARQUET.name())
                 .set("write.parquet.compression-codec", "zstd")
+                .set("write.parquet.compression", "zstd") // fallback / older key
                 .set("write.target-file-size-bytes", "134217728") // 128MB
                 .set("write.parquet.page-size-bytes", "1048576")   // 1MB
                 .set("write.parquet.dict-size-bytes", "2097152")   // 2MB
