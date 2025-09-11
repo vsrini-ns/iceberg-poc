@@ -6,7 +6,9 @@ import org.apache.iceberg.aws.glue.GlueCatalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.GenericRecord;
-import org.apache.iceberg.hadoop.HadoopFileIO;
+import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.data.Record;
+import org.apache.iceberg.aws.s3.S3FileIO;
 
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
@@ -35,7 +37,7 @@ public class AIGEventsTableCreator {
     private static final String[] MODELS = {"gpt-4", "claude-3", "llama-2", "gemini-pro", "titan-xl"};
 
     // Tenant-specific KMS key aliases for S3 encryption
-    private static final Map<String, String> TENANT_SPECIFIC_KMS_KEY_ALIAS = new HashMap<String, String>() {{
+    private static final Map<String, String> TENANT_SPECIFIC_KMS_KEY_ALIAS = new HashMap<>() {{
         put("1000", "alias/dpl-tenant-1000");
         put("1001", "alias/dpl-tenant-1001");
         put("1002", "alias/dpl-tenant-1002");
@@ -348,170 +350,90 @@ public class AIGEventsTableCreator {
         return rateLimits;
     }
 
-    @SuppressWarnings("unchecked")
     private static void writeRecordsWithPartitioning(Table table, List<GenericRecord> records) throws Exception {
-        System.out.println("Writing records with tenant-specific KMS encryption...");
+        System.out.println("Writing records with tenant-specific KMS encryption using partitioned TaskWriter...");
 
-        // Debug: Print the actual FileIO type
-        System.out.println("Table FileIO type: " + table.io().getClass().getName());
-
-        // Use Iceberg's data append API for simpler partitioned writes
-        AppendFiles append = table.newAppend();
-
-        // Group records by partition to create separate files
-        Map<String, List<GenericRecord>> partitionedRecords = new HashMap<>();
-
+        // Group records by tenant to apply tenant-specific KMS encryption
+        Map<Integer, List<GenericRecord>> recordsByTenant = new HashMap<>();
         for (GenericRecord record : records) {
-            // Create partition key using all partition fields: tenant_id and timestamp-based partitions
             Integer tenantId = (Integer) record.getField("tenant_id");
-            Long timestamp = (Long) record.getField("timestamp");
-
-            // Create a comprehensive partition key
-            String partitionKey = tenantId + "_" + timestamp;
-            partitionedRecords.computeIfAbsent(partitionKey, k -> new ArrayList<>()).add(record);
+            recordsByTenant.computeIfAbsent(tenantId, k -> new ArrayList<>()).add(record);
         }
 
-        // Write each partition group to separate files with tenant-specific KMS encryption
-        for (Map.Entry<String, List<GenericRecord>> entry : partitionedRecords.entrySet()) {
-            List<GenericRecord> partitionRecords = entry.getValue();
+        AppendFiles append = table.newAppend();
 
-            // Get the first record to compute partition values and determine tenant-specific KMS key
-            GenericRecord firstRecord = partitionRecords.get(0);
-            Integer tenantId = (Integer) firstRecord.getField("tenant_id");
+        for (Map.Entry<Integer, List<GenericRecord>> entry : recordsByTenant.entrySet()) {
+            Integer tenantId = entry.getKey();
+            List<GenericRecord> tenantRecords = entry.getValue();
             String tenantKMSKey = getKMSKeyForTenant(tenantId.toString());
 
-            System.out.println("  - Writing partition for tenant " + tenantId + " with KMS key: " + tenantKMSKey);
+            System.out.println("  - Writing " + tenantRecords.size() + " records for tenant " + tenantId + " with KMS key: " + tenantKMSKey);
 
-            // Create partition data structure using Iceberg's partition spec
-            org.apache.iceberg.data.GenericRecord partitionRecord = org.apache.iceberg.data.GenericRecord.create(table.spec().partitionType());
-
-            // Compute partition values according to the partition spec
-            PartitionSpec spec = table.spec();
-            for (int i = 0; i < spec.fields().size(); i++) {
-                PartitionField field = spec.fields().get(i);
-                String sourceName = table.schema().findColumnName(field.sourceId());
-                Object sourceValue = firstRecord.getField(sourceName);
-
-                // Get the partition field name
-                String partitionFieldName = field.name();
-
-                if (field.transform().isIdentity()) {
-                    // Identity transform - use the value as-is
-                    partitionRecord.setField(partitionFieldName, sourceValue);
-                } else {
-                    // Handle timestamp transforms (year, month, day, hour)
-                    if (sourceValue instanceof Long) {
-                        Long longValue = (Long) sourceValue;
-                        // Apply the transform using Iceberg's transform API
-                        org.apache.iceberg.transforms.Transform<Long, Integer> transform =
-                            (org.apache.iceberg.transforms.Transform<Long, Integer>) field.transform();
-                        Integer partitionValue = transform.bind(table.schema().findType(field.sourceId())).apply(longValue);
-                        partitionRecord.setField(partitionFieldName, partitionValue);
-                    } else {
-                        partitionRecord.setField(partitionFieldName, sourceValue);
-                    }
-                }
-            }
-
-            // Create proper data location for this partition using Iceberg's partition path structure
-            String fileLocation = table.locationProvider().newDataLocation(table.spec(), partitionRecord, "data-" + UUID.randomUUID() + ".parquet");
-
-            // Create a tenant-specific configuration for this partition
-            Configuration tenantSpecificConf = new Configuration();
-
-            // First, set up the basic S3 filesystem configuration
-            tenantSpecificConf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-            tenantSpecificConf.set("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-            tenantSpecificConf.set("fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain");
-            tenantSpecificConf.set("fs.s3.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain");
-            tenantSpecificConf.set("fs.s3a.path.style.access", "true");
-            tenantSpecificConf.set("fs.s3.path.style.access", "true");
-            tenantSpecificConf.set("fs.s3a.endpoint", "s3.us-west-2.amazonaws.com");
-            tenantSpecificConf.set("fs.s3.endpoint", "s3.us-west-2.amazonaws.com");
-            tenantSpecificConf.set("fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem");
-
-            // Copy other non-encryption settings from existing configuration if available
-            if (table.io() instanceof HadoopFileIO) {
-                System.out.println("Copying non-encryption settings from existing HadoopFileIO configuration");
-                HadoopFileIO hadoopFileIO = (HadoopFileIO) table.io();
-                Configuration existingConf = hadoopFileIO.conf();
-                for (Map.Entry<String, String> entry2 : existingConf) {
-                    String key = entry2.getKey();
-                    // Skip encryption-related settings to avoid overwriting tenant-specific keys
-                    if (!key.contains("encryption") && !key.contains("server-side-encryption")) {
-                        tenantSpecificConf.set(key, entry2.getValue());
-                    }
-                }
-            } else {
-                System.out.println("Table FileIO is not HadoopFileIO, using basic configuration");
-            }
-
-            // Set tenant-specific KMS encryption settings (these must come LAST to avoid being overwritten)
-            tenantSpecificConf.set("fs.s3a.server-side-encryption-algorithm", "SSE-KMS");
-            tenantSpecificConf.set("fs.s3a.encryption.key", tenantKMSKey);
-            tenantSpecificConf.set("fs.s3.server-side-encryption-algorithm", "SSE-KMS");
-            tenantSpecificConf.set("fs.s3.encryption.key", tenantKMSKey);
-
-            // Debug: Verify the tenant-specific KMS key is correctly set
-            String actualS3aKey = tenantSpecificConf.get("fs.s3a.encryption.key");
-            String actualS3Key = tenantSpecificConf.get("fs.s3.encryption.key");
-            System.out.println("    → Tenant " + tenantId + " encryption config:");
-            System.out.println("      fs.s3a.encryption.key: " + actualS3aKey);
-            System.out.println("      fs.s3.encryption.key: " + actualS3Key);
-
-            if (!tenantKMSKey.equals(actualS3aKey) || !tenantKMSKey.equals(actualS3Key)) {
-                System.err.println("    ⚠️  WARNING: KMS key mismatch detected!");
-                System.err.println("       Expected: " + tenantKMSKey);
-                System.err.println("       Actual s3a: " + actualS3aKey);
-                System.err.println("       Actual s3: " + actualS3Key);
-            }
-
-            // Create tenant-specific FileIO using Iceberg's AWS FileIO instead of Hadoop FileIO
-            // This approach gives us direct control over S3 client configuration
+            // Create tenant-specific S3 FileIO with KMS encryption
             Map<String, String> tenantFileIOProperties = new HashMap<>();
             tenantFileIOProperties.put("s3.sse.type", "kms");
             tenantFileIOProperties.put("s3.sse.key", tenantKMSKey);
             tenantFileIOProperties.put("s3.endpoint", "https://s3.us-west-2.amazonaws.com");
             tenantFileIOProperties.put("s3.path-style-access", "true");
 
-            // Create a tenant-specific AWS FileIO
-            org.apache.iceberg.aws.s3.S3FileIO s3FileIO = new org.apache.iceberg.aws.s3.S3FileIO();
+            S3FileIO s3FileIO = new S3FileIO();
             s3FileIO.initialize(tenantFileIOProperties);
 
-            System.out.println("    → Using S3FileIO with direct KMS configuration: " + tenantKMSKey);
-
             try (org.apache.iceberg.io.FileIO tenantFileIO = s3FileIO) {
-                org.apache.iceberg.io.OutputFile outputFile = tenantFileIO.newOutputFile(fileLocation);
-
-                // Create data writer factory with tenant-specific properties
-                org.apache.iceberg.data.GenericAppenderFactory factory =
-                    new org.apache.iceberg.data.GenericAppenderFactory(table.schema(), table.spec());
-
-                // Create data writer
-                org.apache.iceberg.io.DataWriter<org.apache.iceberg.data.Record> writer = factory.newDataWriter(
-                    table.encryption().encrypt(outputFile),
-                    FileFormat.PARQUET,
-                    partitionRecord
-                );
-
-                try {
-                    // Write all records for this partition
-                    for (GenericRecord record : partitionRecords) {
-                        writer.write(record);
+                // Group records by partition key (using partition spec fields)
+                Map<List<Object>, List<GenericRecord>> recordsByPartition = new HashMap<>();
+                List<String> partitionFields = new ArrayList<>();
+                table.spec().fields().forEach(f -> partitionFields.add(f.name()));
+                for (GenericRecord record : tenantRecords) {
+                    List<Object> key = new ArrayList<>();
+                    for (String field : partitionFields) {
+                        key.add(record.getField(field));
                     }
-                } finally {
-                    writer.close();
+                    recordsByPartition.computeIfAbsent(key, k -> new ArrayList<>()).add(record);
                 }
 
-                // Add the data file to the append operation
-                append.appendFile(writer.toDataFile());
+                org.apache.iceberg.data.GenericAppenderFactory appenderFactory = new org.apache.iceberg.data.GenericAppenderFactory(table.schema(), table.spec());
+                int fileCount = 0;
+                for (Map.Entry<List<Object>, List<GenericRecord>> partitionEntry : recordsByPartition.entrySet()) {
+                    List<Object> partitionKey = partitionEntry.getKey();
+                    List<GenericRecord> partitionRecords = partitionEntry.getValue();
 
-                System.out.println("    ✓ Wrote " + partitionRecords.size() + " records to partition");
+                    // Build PartitionData for this partition
+                    org.apache.iceberg.PartitionData partitionData = new org.apache.iceberg.PartitionData(table.spec().partitionType());
+                    for (int i = 0; i < partitionFields.size(); i++) {
+                        partitionData.set(i, partitionKey.get(i));
+                    }
+
+                    // Generate a file path using the location provider and partitionData (correct signature)
+                    String filePath = table.locationProvider().newDataLocation(table.spec(), partitionData, UUID.randomUUID() + ".parquet");
+                    org.apache.iceberg.io.OutputFile outputFile = tenantFileIO.newOutputFile(filePath);
+
+                    // Write records to file (use Record type)
+                    try (org.apache.iceberg.io.FileAppender<Record> writer =
+                             appenderFactory.newAppender(outputFile, FileFormat.PARQUET)) {
+                        for (GenericRecord rec : partitionRecords) {
+                            writer.add(rec);
+                        }
+                    }
+
+                    // Get file size after writing
+                    long fileSize = tenantFileIO.newInputFile(filePath).getLength();
+
+                    // Build DataFile and append
+                    org.apache.iceberg.DataFile dataFile = DataFiles.builder(table.spec())
+                        .withPath(filePath)
+                        .withFileSizeInBytes(fileSize)
+                        .withPartition(partitionData)
+                        .withRecordCount(partitionRecords.size())
+                        .withFormat(FileFormat.PARQUET)
+                        .build();
+                    append.appendFile(dataFile);
+                    fileCount++;
+                }
+                System.out.println("    ✓ Generated " + fileCount + " data files for tenant " + tenantId);
             }
         }
-
-        // Commit all data files atomically
         append.commit();
-        System.out.println("✓ All partitions committed atomically");
+        System.out.println("✓ All tenant partitions committed atomically");
     }
 }
